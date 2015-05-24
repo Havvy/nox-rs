@@ -1,0 +1,4 @@
+[package]
+name = "nox"
+version = "0.1.0"
+authors = ["Ryan Scheel (Havvy) <ryan.havvy@gmail.com>"]
