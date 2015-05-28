@@ -5,3 +5,5 @@ authors = ["Ryan Scheel (Havvy) <ryan.havvy@gmail.com>"]
 
 [dependencies]
 argparse = "0.1.3"
+rustc-serialize = "0.3"
+ansi_term = "0.5.2"
