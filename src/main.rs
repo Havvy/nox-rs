@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+// #![allow(dead_code)]
 #![allow(unused_imports)]
 
 extern crate argparse;
@@ -9,7 +9,7 @@ use std::path::{PathBuf};
 use std::fs::{ReadDir, DirEntry, Metadata, File};
 use std::fs::metadata as fs_metadata;
 use std::io;
-use std::io::{Read};
+use std::io::{Read, Stdin};
 use std::process::{Command, Output};
 use std::fmt;
 
@@ -18,7 +18,7 @@ use argparse::{ArgumentParser, Store};
 use rustc_serialize::json::{Json, Object};
 
 use ansi_term::Colour::{Black, Yellow};
-use ansi_term::Style::Plain;
+use ansi_term::Style;
 
 // ------------------------------------------------------------------------------------------------
 
@@ -69,10 +69,12 @@ fn extract_string(json: Json) -> Option<String> {
 // ------------------------------------------------------------------------------------------------
 
 struct Package {
-    attribute: String,
+    attribute: Attribute,
     name: String,
     description: String
 }
+
+type Attribute = String;
 
 impl fmt::Debug for Package {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -88,14 +90,18 @@ impl Package {
     }
 }
 
-// ------------------------------------------------------------------------------------------------
-
 enum NoxError {
     NoHomeDir,
     Io(io::Error),
     MissingVersionIndicator(PathBuf),
     NixEnvFailed(String, String),
-    NixEnvParseError
+    NixEnvParseError,
+    BadInstallRequestFormat(InstallRequestFormatError)
+}
+
+enum InstallRequestFormatError {
+    NotANumber(String),
+    InvalidIndex(usize)
 }
 
 impl From<io::Error> for NoxError {
@@ -104,7 +110,14 @@ impl From<io::Error> for NoxError {
     }
 }
 
+impl From<InstallRequestFormatError> for NoxError {
+    fn from(error: InstallRequestFormatError) -> NoxError {
+        NoxError::BadInstallRequestFormat(error)
+    }
+}
+
 type NoxResult<T> = Result<T, NoxError>;
+type NoxInstallRequest = Result<Option<Vec<i32>>, String>;
 
 // ------------------------------------------------------------------------------------------------
 
@@ -228,7 +241,7 @@ fn make_key() -> Result<String, NoxError> {
 
 // ------------------------------------------------------------------------------------------------
 
-fn parse_package((attribute, attribute_value): (String, Json)) -> Option<Package> {
+fn parse_package((attribute, attribute_value): (Attribute, Json)) -> Option<Package> {
     extract_object(attribute_value)
     .and_then(|mut attribute_data| {
         let name = attribute_data.remove("name")
@@ -268,12 +281,58 @@ fn all_packages(mut cache: NullCache) -> NoxResult<Vec<Package>> {
 
 fn display_package(ix: &usize, package: &Package) {
     let number = Black.on(Yellow).paint(&ix.to_string()).to_string();
-    let name = Plain.bold().paint(&package.name).to_string();
-    // TODO(Havvy): Implement 'dim' in ansi-term, apply to attribute.
-    let attribute = &package.attribute;
+    let name = Style::default().bold().paint(&package.name).to_string();
+    let attribute = Style::default().dimmed().paint(&package.attribute).to_string();
     let description = &package.description;
 
     println!("{} {} ({})\n    {}", number, name, attribute, description);
+}
+
+fn request_package_indices_to_install(max_index: usize) -> NoxResult<Option<Vec<usize>>> {
+    let mut input = String::new();
+
+    print!("Packages to install: ");
+    try!(io::stdin().read_line(&mut input));
+
+    let input = input.trim();
+
+    if input.is_empty() {
+        return Ok(None);
+    }
+
+    let indices: Result<Vec<usize>, _> = input.split(" ").map(|i| i.parse()).collect();
+    let indices = try!(indices.map_err(|_| {
+        InstallRequestFormatError::NotANumber(input.to_string())
+    }));
+
+    indices.into_iter()
+    .map(|index| {
+        if index > max_index {
+            Err(InstallRequestFormatError::InvalidIndex(index))
+        } else {
+            Ok(index)
+        }
+    })
+    .collect::<Result<Vec<usize>, InstallRequestFormatError>>()
+    .map(Some)
+    .map_err(NoxError::BadInstallRequestFormat)
+}
+
+// ------------------------------------------------------------------------------------------------
+
+fn install_attributes(attributes: Vec<Attribute>) -> NoxResult<()> {
+    let mut install_command = Command::new("nix-env");
+
+    install_command.arg("-iA");
+
+    for attribute in attributes {
+        install_command.arg(attribute);
+    }
+
+    install_command.output();
+
+    // TODO: Stuff with output.
+    Ok(())
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -290,46 +349,54 @@ fn main() {
         cli.parse_args_or_exit();
     }
 
-    let results = all_packages(NullCache)
+    all_packages(NullCache)
     .map(|packages| {
         packages.into_iter()
         .filter(|package| package.query(&query))
         .enumerate()
         .inspect(|&(ref ix, ref package)| display_package(ix, package))
         .collect::<Vec<(usize, Package)>>()
-    });
-    
-    match results {
-        Ok(_results) => {
-            
-        },
-        Err(nox_error) => {
-            match nox_error {
-                NoxError::NoHomeDir => { println!("Error: Cannot find home directory."); },
-                NoxError::Io(io_error) => { println!("IO Error: {:?}", io_error); },
-                _ => { println!("Unknown error occured!"); }
-            }
+    })
+    .map(|options: Vec<(usize, Package)>| {
+        if options.is_empty() {
+            println!("Zero packages match that query.");
+            std::process::exit(0);
         }
-    }
-}
 
-// @click.command()
-// @click.argument('query', default='')
-// def main(query):
-//     """Search a package in nix"""
-//     try:
-//         results = [p for p in all_packages()
-//                    if any(query in s for s in p)]
-//     except NixEvalError:
-//         raise click.ClickException('An error occured while running nix (displayed above). Maybe the nixpkgs eval is broken.')
-//     results.sort()
-//     for i, p in enumerate(results, 1):
-//         line = '{} {} ({})\n    {}'.format(
-//             click.style(str(i), fg='black', bg='yellow'),
-//             click.style(p.name, bold=True),
-//             click.style(p.attribute, dim=True),
-//             click.style(p.description))
-//         click.echo(line)
+        options
+    })
+    .and_then(|options| {
+        let to_install_indices = try!(request_package_indices_to_install(options.len()));
+
+        let to_install_indices = to_install_indices.unwrap_or_else(|| {
+            println!("User requested not to install any packages.");
+            std::process::exit(0);
+        });
+
+        Ok(
+            to_install_indices
+            .into_iter()
+            .map(|ix| options[ix].1.attribute.clone())
+            .collect::<Vec<Attribute>>()
+        )
+    })
+    .and_then(install_attributes)
+    .unwrap_or_else(|nox_error| {
+        match nox_error {
+            NoxError::NoHomeDir => { println!("Error: Cannot find home directory."); },
+            NoxError::Io(io_error) => { println!("IO Error: {:?}", io_error); },
+            NoxError::NixEnvFailed(_, _) => { println!("Error: Calling nix-env failed."); },
+            NoxError::NixEnvParseError => { println!("nix-env result oddly formated."); }
+            _ => { println!("Unknown error occured!"); }
+        }
+
+        std::process::exit(1);
+    });
+
+    print!("Packages to install: ");
+
+
+}
 
 //     if results:
 //         def parse_input(inp):
